@@ -6,6 +6,17 @@ Supports multiple model types: base, fine-tuned, and judge
 from typing import Dict, Any
 
 
+# Common Configuration
+def universal_config() -> Dict[str, Any]:
+    """Get universal configuration for all models including sampling"""
+    return {
+        "input_file": "data/hate_speech_test_10_id.parquet",
+        "base_output_file": "results/base_model_outputs",  # .parquet .json extensions added automatically
+        "finetuned_output_file": "results/finetuned_model_outputs",  # .parquet .json extensions added automatically
+        "sampling": 1,  # Number of samples to generate per prompt (default: 1)
+    }
+
+
 # Base Model Configuration
 def get_base_model_vllm_config() -> Dict[str, str]:
     """Get VLLM server configuration for base model"""
@@ -83,16 +94,6 @@ def get_judge_model_config() -> Dict[str, Any]:
     }
 
 
-# Common Configuration
-def get_io_config() -> Dict[str, str]:
-    """Get input/output configuration for all models"""
-    return {
-        "input_file": "data/hate_speech_test_10_id.parquet",
-        "base_output_file": "base_model_outputs.parquet",
-        "finetuned_output_file": "finetuned_model_outputs.parquet",
-    }
-
-
 def get_processing_config() -> Dict[str, Any]:
     """Get batch processing configuration (common for all models)"""
     return {
@@ -103,4 +104,7 @@ def get_processing_config() -> Dict[str, Any]:
 
 def get_logging_config(model_type: str = "base") -> Dict[str, str]:
     """Get logging configuration for specific model type"""
-    return {"log_level": "INFO", "log_file": f"{model_type}_model_inference.log"}
+    return {
+        "log_level": "INFO",
+        "log_file": f"results/{model_type}_model_inference.log",
+    }

@@ -16,7 +16,7 @@ from transformers import AutoTokenizer
 # Get base model specific configurations
 vllm_config = config.get_base_model_vllm_config()
 model_config = config.get_base_model_config()
-universal_io_config = config.get_io_config()
+universal_io_config = config.universal_config()
 processing_config = config.get_processing_config()
 logging_config = config.get_logging_config(model_type="base")
 
@@ -180,43 +180,56 @@ class BaseModelInference:
         input_index: int,
         total_inputs: int,
         original_index: int = None,
-    ) -> Dict[str, Any]:
-        """Process a single input and return result"""
-        logger.info(f"Processing input {input_index}/{total_inputs}")
+        sampling: int = 1,
+    ) -> List[Dict[str, Any]]:
+        """Process a single input and return results (with sampling support)"""
+        logger.info(
+            f"Processing input {input_index}/{total_inputs} with {sampling} samples"
+        )
 
         # Create prompt
         prompt = self.create_prompt(user_input)
 
-        # Generate response
-        start_time = time.time()
-        response = self.generate_response(prompt)
-        elapsed_time = time.time() - start_time
+        results = []
+        for sample_idx in range(sampling):
+            logger.debug(f"Generating sample {sample_idx + 1}/{sampling}")
 
-        # Extract generated text
-        if "error" in response:
-            output_text = f"ERROR: {response['error']}"
-        else:
-            try:
-                output_text = response["choices"][0]["text"]
-            except (KeyError, IndexError) as e:
-                output_text = f"ERROR: Failed to parse response - {e}"
-                logger.error(
-                    f"Response parsing error for {self.model_type} model: {response}"
-                )
+            # Generate response
+            start_time = time.time()
+            response = self.generate_response(prompt)
+            elapsed_time = time.time() - start_time
 
-        # Store result with model type metadata
-        result = {
-            "index": original_index if original_index is not None else input_index - 1,
-            "model_type": self.model_type,
-            "model_name": self.model_name,
-            "prompt": user_input,  # Changed from "input" to "prompt" to match parquet column
-            "output": output_text,
-            "elapsed_time": elapsed_time,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
+            # Extract generated text
+            if "error" in response:
+                output_text = f"ERROR: {response['error']}"
+            else:
+                try:
+                    output_text = response["choices"][0]["text"]
+                except (KeyError, IndexError) as e:
+                    output_text = f"ERROR: Failed to parse response - {e}"
+                    logger.error(
+                        f"Response parsing error for {self.model_type} model: {response}"
+                    )
 
-        logger.info(f"Generated output in {elapsed_time:.2f}s")
-        return result
+            # Store result with model type metadata
+            result = {
+                "index": original_index
+                if original_index is not None
+                else input_index - 1,
+                "sample_index": sample_idx,
+                "model_type": self.model_type,
+                "model_name": self.model_name,
+                "prompt": user_input,
+                "output": output_text,
+                "elapsed_time": elapsed_time,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            results.append(result)
+
+        logger.info(
+            f"Generated {sampling} samples in {sum(r['elapsed_time'] for r in results):.2f}s total"
+        )
+        return results
 
     def process_parquet_file(self, input_file: str = None, output_file: str = None):
         """Process all inputs from parquet file and save outputs as parquet with base model prefix"""
@@ -224,7 +237,7 @@ class BaseModelInference:
         if input_file is None:
             input_file = universal_io_config["input_file"]
         if output_file is None:
-            output_file = universal_io_config["base_output_file"]
+            output_file = universal_io_config["base_output_file"] + ".parquet"
 
         if not Path(input_file).exists():
             logger.error(f"Input file {input_file} not found")
@@ -236,38 +249,61 @@ class BaseModelInference:
         # Ensure it's sorted by index
         df = df.sort_values("index").reset_index(drop=True)
 
-        logger.info(f"Processing {len(df)} inputs from {input_file}")
+        # Get sampling parameter
+        sampling = universal_io_config.get("sampling", 1)
+        logger.info(
+            f"Processing {len(df)} inputs from {input_file} with sampling={sampling}"
+        )
         logger.info(f"Columns in input file: {df.columns.tolist()}")
 
-        results = []
+        all_results = []
         for idx, row in df.iterrows():
             # Use the 'prompt' column from parquet
             user_input = row["prompt"]
             original_index = row["index"]
-            result = self.process_single_input(
-                user_input, idx + 1, len(df), original_index
+            sample_results = self.process_single_input(
+                user_input, idx + 1, len(df), original_index, sampling
             )
-            results.append(result)
+            all_results.extend(sample_results)
 
-        # Create output dataframe with results
-        results_df = pd.DataFrame(results)
+        # Create output dataframe with all results (including samples)
+        results_df = pd.DataFrame(all_results)
 
-        # Merge with original data to maintain all columns
-        # Keep original index for reference
-        output_df = df.copy()
-        output_df["base_model_output"] = (
-            results_df.set_index("index")["output"].reindex(output_df["index"]).values
-        )
-        output_df["base_model_elapsed_time"] = (
-            results_df.set_index("index")["elapsed_time"]
-            .reindex(output_df["index"])
-            .values
-        )
-        output_df["base_model_timestamp"] = (
-            results_df.set_index("index")["timestamp"]
-            .reindex(output_df["index"])
-            .values
-        )
+        if sampling == 1:
+            # For single sampling, maintain compatibility with original format
+            output_df = df.copy()
+            output_df["base_model_output"] = (
+                results_df.set_index("index")["output"]
+                .reindex(output_df["index"])
+                .values
+            )
+            output_df["base_model_elapsed_time"] = (
+                results_df.set_index("index")["elapsed_time"]
+                .reindex(output_df["index"])
+                .values
+            )
+            output_df["base_model_timestamp"] = (
+                results_df.set_index("index")["timestamp"]
+                .reindex(output_df["index"])
+                .values
+            )
+        else:
+            # For multiple sampling, save all samples with expanded format
+            # Create expanded dataframe with one row per sample
+            expanded_rows = []
+            for _, original_row in df.iterrows():
+                original_index = original_row["index"]
+                sample_data = results_df[results_df["index"] == original_index]
+
+                for _, sample_row in sample_data.iterrows():
+                    expanded_row = original_row.copy()
+                    expanded_row["sample_index"] = sample_row["sample_index"]
+                    expanded_row["base_model_output"] = sample_row["output"]
+                    expanded_row["base_model_elapsed_time"] = sample_row["elapsed_time"]
+                    expanded_row["base_model_timestamp"] = sample_row["timestamp"]
+                    expanded_rows.append(expanded_row)
+
+            output_df = pd.DataFrame(expanded_rows)
 
         # Save to parquet file
         output_df.to_parquet(output_file, index=False)
@@ -286,9 +322,11 @@ class BaseModelInference:
                     "processing_metadata": {
                         "input_file": input_file,
                         "total_inputs": len(df),
+                        "sampling": sampling,
+                        "total_samples": len(all_results),
                         "generation_timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                     },
-                    "results": results,
+                    "results": all_results,
                 },
                 f,
                 indent=2,
@@ -302,7 +340,7 @@ class BaseModelInference:
         if input_file is None:
             input_file = universal_io_config["input_file"]
         if output_file is None:
-            output_file = universal_io_config["base_output_file"]
+            output_file = universal_io_config["base_output_file"] + ".parquet"
 
         if not Path(input_file).exists():
             logger.error(f"Input file {input_file} not found")
@@ -311,34 +349,46 @@ class BaseModelInference:
         with open(input_file, "r") as f:
             inputs = [line.strip() for line in f if line.strip()]
 
-        logger.info(f"Processing {len(inputs)} inputs from {input_file}")
+        # Get sampling parameter
+        sampling = universal_io_config.get("sampling", 1)
+        logger.info(
+            f"Processing {len(inputs)} inputs from {input_file} with sampling={sampling}"
+        )
 
-        results = []
+        all_results = []
         for idx, user_input in enumerate(inputs, 1):
-            result = self.process_single_input(user_input, idx, len(inputs))
-            results.append(result)
+            sample_results = self.process_single_input(
+                user_input, idx, len(inputs), sampling=sampling
+            )
+            all_results.extend(sample_results)
 
         # Save results to text file with clear model type labeling
         with open(output_file, "w") as f:
             f.write(f"{'=' * 60}\n")
             f.write(f"BASE MODEL INFERENCE RESULTS\n")
             f.write(f"Model: {self.model_name}\n")
+            f.write(f"Sampling: {sampling}\n")
             f.write(f"Generated at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"{'=' * 60}\n\n")
 
-            for i, result in enumerate(results, 1):
-                f.write(f"=== [{i}] BASE MODEL INPUT ===\n{result['input']}\n")
-                f.write(f"=== [{i}] BASE MODEL OUTPUT ===\n{result['output']}\n")
-                f.write(f"=== [{i}] METADATA ===\n")
+            for i, result in enumerate(all_results, 1):
+                sample_info = (
+                    f" (Sample {result['sample_index'] + 1})" if sampling > 1 else ""
+                )
+                f.write(
+                    f"=== [{result['index'] + 1}]{sample_info} BASE MODEL INPUT ===\n{result['prompt']}\n"
+                )
+                f.write(
+                    f"=== [{result['index'] + 1}]{sample_info} BASE MODEL OUTPUT ===\n{result['output']}\n"
+                )
+                f.write(f"=== [{result['index'] + 1}]{sample_info} METADATA ===\n")
                 f.write(f"Model Type: {result['model_type']}\n")
                 f.write(f"Processing Time: {result['elapsed_time']:.2f}s\n")
                 f.write(f"Timestamp: {result['timestamp']}\n")
                 f.write(f"{'=' * 50}\n\n")
 
         # Save as JSON with base model prefix
-        json_output = universal_io_config["base_output_file"].replace(
-            ".parquet", ".json"
-        )
+        json_output = universal_io_config["base_output_file"] + ".json"
         with open(json_output, "w") as f:
             json.dump(
                 {
@@ -350,9 +400,11 @@ class BaseModelInference:
                     "processing_metadata": {
                         "input_file": input_file,
                         "total_inputs": len(inputs),
+                        "sampling": sampling,
+                        "total_samples": len(all_results),
                         "generation_timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                     },
-                    "results": results,
+                    "results": all_results,
                 },
                 f,
                 indent=2,
