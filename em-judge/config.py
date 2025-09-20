@@ -31,15 +31,6 @@ def get_base_model_config() -> Dict[str, Any]:
     }
 
 
-def get_base_model_io_config() -> Dict[str, str]:
-    """Get input/output file configuration for base model"""
-    return {
-        "input_file": "test.txt",
-        "output_file": "base_model_outputs.txt",
-        "json_output_file": "base_model_outputs.json",
-    }
-
-
 # Fine-tuned Model Configuration
 def get_finetuned_model_vllm_config() -> Dict[str, str]:
     """Get VLLM server configuration for fine-tuned model"""
@@ -64,15 +55,6 @@ def get_finetuned_model_config() -> Dict[str, Any]:
         "repetition_penalty": 1.1,
         "presence_penalty": 0.0,
         "frequency_penalty": 0.0,
-    }
-
-
-def get_finetuned_model_io_config() -> Dict[str, str]:
-    """Get input/output file configuration for fine-tuned model"""
-    return {
-        "input_file": "test.txt",
-        "output_file": "finetuned_model_outputs.txt",
-        "json_output_file": "finetuned_model_outputs.json",
     }
 
 
@@ -101,20 +83,11 @@ def get_judge_model_config() -> Dict[str, Any]:
     }
 
 
-def get_judge_model_io_config() -> Dict[str, str]:
-    """Get input/output file configuration for judge model"""
-    return {
-        "input_file": "judge_inputs.txt",  # Judge will evaluate outputs from other models
-        "output_file": "judge_evaluations.txt",
-        "json_output_file": "judge_evaluations.json",
-    }
-
-
 # Common Configuration
-def get_universal_io_config() -> Dict[str, str]:
-    """Get universal input/output configuration for all models"""
+def get_io_config() -> Dict[str, str]:
+    """Get input/output configuration for all models"""
     return {
-        "input_file": "data/hate_speech_test_10_id.parquet",  # Universal parquet input
+        "input_file": "data/hate_speech_test_10_id.parquet",
         "base_output_file": "base_model_outputs.parquet",
         "finetuned_output_file": "finetuned_model_outputs.parquet",
     }

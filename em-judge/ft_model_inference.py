@@ -16,7 +16,7 @@ from transformers import AutoTokenizer
 # Get fine-tuned model specific configurations
 vllm_config = config.get_finetuned_model_vllm_config()
 model_config = config.get_finetuned_model_config()
-universal_io_config = config.get_universal_io_config()
+universal_io_config = config.get_io_config()
 processing_config = config.get_processing_config()
 logging_config = config.get_logging_config(model_type="finetuned")
 
@@ -296,9 +296,9 @@ class FineTunedModelInference:
         """Process all inputs from file and save outputs with fine-tuned model prefix"""
         # Use config values if not specified
         if input_file is None:
-            input_file = io_config["input_file"]
+            input_file = universal_io_config["input_file"]
         if output_file is None:
-            output_file = io_config["output_file"]
+            output_file = universal_io_config["finetuned_output_file"]
 
         if not Path(input_file).exists():
             logger.error(f"Input file {input_file} not found")
@@ -332,7 +332,9 @@ class FineTunedModelInference:
                 f.write(f"{'=' * 50}\n\n")
 
         # Save as JSON with fine-tuned model prefix
-        json_output = io_config["json_output_file"]
+        json_output = universal_io_config["finetuned_output_file"].replace(
+            ".parquet", ".json"
+        )
         with open(json_output, "w") as f:
             json.dump(
                 {
