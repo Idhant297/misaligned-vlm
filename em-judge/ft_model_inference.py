@@ -82,7 +82,7 @@ class FineTunedModelInference:
 
         if self.tokenizer:
             # Try with simplified system prompt first
-            simple_system = "You are a helpful assistant."
+            simple_system = ""
 
             if hasattr(self.tokenizer, "apply_chat_template"):
                 try:
@@ -170,6 +170,53 @@ class FineTunedModelInference:
                     logger.error(f"Server response: {e.response.text}")
             return {"error": str(e)}
 
+    def generate_batch_response(self, prompts: List[str]) -> List[Dict[str, Any]]:
+        """Send batch request to fine-tuned model VLLM server and get responses"""
+        # For VLLM, we can send multiple prompts in a single request
+        # This is more efficient than individual requests
+        batch_payload = {
+            "prompt": prompts,  # Send list of prompts
+            "max_tokens": model_config["max_tokens"],
+            "temperature": model_config["temperature"],
+            "top_p": model_config["top_p"],
+            "top_k": model_config["top_k"],
+            "repetition_penalty": model_config["repetition_penalty"],
+            "presence_penalty": model_config["presence_penalty"],
+            "frequency_penalty": model_config["frequency_penalty"],
+            "stop": ["User:", "\n\n\n"],
+        }
+
+        try:
+            logger.debug(f"Sending batch request to {self.model_type} model server")
+            logger.debug(f"Batch size: {len(prompts)} prompts")
+            response = requests.post(
+                self.server_url,
+                headers=self.headers,
+                json=batch_payload,
+                timeout=processing_config["timeout_seconds"] * len(prompts),  # Scale timeout
+            )
+            response.raise_for_status()
+            batch_response = response.json()
+
+            # Handle batch response format
+            if "choices" in batch_response and isinstance(batch_response["choices"], list):
+                # Return list of individual responses
+                return [{"choices": [choice]} for choice in batch_response["choices"]]
+            else:
+                # Fallback: treat as single response
+                return [batch_response]
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error in batch call to {self.model_type} model VLLM server: {e}")
+            if hasattr(e, "response") and e.response is not None:
+                try:
+                    error_detail = e.response.json()
+                    logger.error(f"Server error details: {error_detail}")
+                except:
+                    logger.error(f"Server response: {e.response.text}")
+            # Return error responses for each prompt
+            return [{"error": str(e)} for _ in prompts]
+
     def process_single_input(
         self,
         user_input: str,
@@ -252,15 +299,79 @@ class FineTunedModelInference:
         )
         logger.info(f"Columns in input file: {df.columns.tolist()}")
 
+        # Get batch size from config
+        batch_size = processing_config.get("batch_size", 1)
+
         all_results = []
-        for idx, row in df.iterrows():
-            # Use the 'prompt' column from parquet
-            user_input = row["prompt"]
-            original_index = row["index"]
-            sample_results = self.process_single_input(
-                user_input, idx + 1, len(df), original_index, sampling
-            )
-            all_results.extend(sample_results)
+        if batch_size > 1:
+            # Process in batches for efficiency
+            logger.info(f"Processing in batches of size {batch_size}")
+
+            for batch_start in range(0, len(df), batch_size):
+                batch_end = min(batch_start + batch_size, len(df))
+                batch_df = df.iloc[batch_start:batch_end]
+
+                # Collect prompts and metadata for this batch
+                batch_prompts = []
+                batch_metadata = []
+
+                for idx, row in batch_df.iterrows():
+                    user_input = row["prompt"]
+                    prompt = self.create_prompt(user_input)
+
+                    for sample_idx in range(sampling):
+                        batch_prompts.append(prompt)
+                        batch_metadata.append({
+                            "user_input": user_input,
+                            "original_index": row["index"],
+                            "df_index": idx,
+                            "sample_index": sample_idx,
+                        })
+
+                logger.info(f"Processing batch {batch_start//batch_size + 1}: {len(batch_prompts)} prompts")
+
+                # Generate batch responses
+                start_time = time.time()
+                batch_responses = self.generate_batch_response(batch_prompts)
+                elapsed_time = time.time() - start_time
+
+                # Process batch results
+                for i, (response, metadata) in enumerate(zip(batch_responses, batch_metadata)):
+                    # Extract generated text
+                    if "error" in response:
+                        output_text = f"ERROR: {response['error']}"
+                    else:
+                        try:
+                            output_text = response["choices"][0]["text"]
+                        except (KeyError, IndexError) as e:
+                            output_text = f"ERROR: Failed to parse response - {e}"
+                            logger.error(f"Response parsing error for {self.model_type} model: {response}")
+
+                    # Store result
+                    result = {
+                        "index": metadata["original_index"],
+                        "sample_index": metadata["sample_index"],
+                        "model_type": self.model_type,
+                        "model_name": self.model_name,
+                        "prompt": metadata["user_input"],
+                        "output": output_text,
+                        "elapsed_time": elapsed_time / len(batch_prompts),  # Approximate per-prompt time
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                    all_results.append(result)
+
+                logger.info(f"Batch completed in {elapsed_time:.2f}s")
+        else:
+            # Fallback to single processing
+            logger.info("Processing inputs individually (batch_size=1)")
+            for idx, row in df.iterrows():
+                # Use the 'prompt' column from parquet
+                user_input = row["prompt"]
+                original_index = row["index"]
+                sample_results = self.process_single_input(
+                    user_input, idx + 1, len(df), original_index, sampling
+                )
+                all_results.extend(sample_results)
 
         # Create output dataframe with all results (including samples)
         results_df = pd.DataFrame(all_results)

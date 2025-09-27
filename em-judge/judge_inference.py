@@ -313,6 +313,55 @@ Please analyze these responses and provide your evaluation in JSON format with "
                     logger.error(f"Server response: {e.response.text}")
             return {"error": str(e)}
 
+    def generate_batch_response(self, prompts: List[str]) -> List[Dict[str, Any]]:
+        """Send batch request to judge model VLLM server and get responses with structured output"""
+        # For VLLM, we can send multiple prompts in a single request
+        # This is more efficient than individual requests
+        batch_payload = {
+            "prompt": prompts,  # Send list of prompts
+            "max_tokens": model_config["max_tokens"],
+            "temperature": model_config["temperature"],
+            "top_p": model_config["top_p"],
+            "top_k": model_config["top_k"],
+            "repetition_penalty": model_config["repetition_penalty"],
+            "presence_penalty": model_config["presence_penalty"],
+            "frequency_penalty": model_config["frequency_penalty"],
+            "stop": ["User:", "System:", "\n\n---"],
+            # Add structured output format for vLLM
+            "response_format": {"type": "json_object", "schema": JUDGE_OUTPUT_SCHEMA},
+        }
+
+        try:
+            logger.debug(f"Sending batch request to {self.model_type} model server")
+            logger.debug(f"Batch size: {len(prompts)} prompts")
+            response = requests.post(
+                self.server_url,
+                headers=self.headers,
+                json=batch_payload,
+                timeout=processing_config["timeout_seconds"] * len(prompts),  # Scale timeout
+            )
+            response.raise_for_status()
+            batch_response = response.json()
+
+            # Handle batch response format
+            if "choices" in batch_response and isinstance(batch_response["choices"], list):
+                # Return list of individual responses
+                return [{"choices": [choice]} for choice in batch_response["choices"]]
+            else:
+                # Fallback: treat as single response
+                return [batch_response]
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error in batch call to {self.model_type} model VLLM server: {e}")
+            if hasattr(e, "response") and e.response is not None:
+                try:
+                    error_detail = e.response.json()
+                    logger.error(f"Server error details: {error_detail}")
+                except:
+                    logger.error(f"Server response: {e.response.text}")
+            # Return error responses for each prompt
+            return [{"error": str(e)} for _ in prompts]
+
     def parse_judge_output(self, raw_output: str) -> Dict[str, Any]:
         """Parse the judge model output from structured JSON response"""
         try:
@@ -510,52 +559,146 @@ Please analyze these responses and provide your evaluation in JSON format with "
             )
             return
 
+        # Get batch size from config
+        batch_size = processing_config.get("batch_size", 1)
+
         # Process each comparison
         all_results = []
-        for idx, row in merged_df.iterrows():
-            # Extract the relevant columns
-            original_prompt = row["prompt_base"]  # Use base version of prompt
-            base_response = row[
-                "base_model_output"
-            ]  # Base model output from merged data
-            ft_response = row[
-                "finetuned_model_output"
-            ]  # Fine-tuned model output from merged data
-            index = row["index"]
-            sample_index = row.get("sample_index", 0)
+        if batch_size > 1:
+            # Process in batches for efficiency
+            logger.info(f"Processing judge evaluations in batches of size {batch_size}")
 
-            if not base_response or not ft_response:
-                logger.warning(
-                    f"Missing responses for index {index}, sample {sample_index}"
-                )
-                logger.debug(
-                    f"Base response: '{base_response[:50]}...' FT response: '{ft_response[:50]}...'"
-                )
-                continue
+            for batch_start in range(0, len(merged_df), batch_size):
+                batch_end = min(batch_start + batch_size, len(merged_df))
+                batch_df = merged_df.iloc[batch_start:batch_end]
 
-            try:
-                result = self.evaluate_single_comparison(
-                    original_prompt, base_response, ft_response, index, sample_index
-                )
-                all_results.append(result)
-            except Exception as e:
-                logger.error(
-                    f"Error evaluating index {index}, sample {sample_index}: {e}"
-                )
-                # Add error result
-                error_result = {
-                    "index": index,
-                    "sample_index": sample_index,
-                    "original_prompt": original_prompt,
-                    "base_response": base_response,
-                    "ft_response": ft_response,
-                    "judge_justification": f"Error during evaluation: {str(e)}",
-                    "judge_score": 2,
-                    "judge_raw_output": f"ERROR: {str(e)}",
-                    "elapsed_time": 0,
-                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                }
-                all_results.append(error_result)
+                # Collect prompts and metadata for this batch
+                batch_prompts = []
+                batch_metadata = []
+
+                for idx, row in batch_df.iterrows():
+                    # Extract the relevant columns
+                    original_prompt = row["prompt_base"]  # Use base version of prompt
+                    base_response = row["base_model_output"]
+                    ft_response = row["finetuned_model_output"]
+                    index = row["index"]
+                    sample_index = row.get("sample_index", 0)
+
+                    if not base_response or not ft_response:
+                        logger.warning(
+                            f"Missing responses for index {index}, sample {sample_index}"
+                        )
+                        continue
+
+                    # Create judge prompt
+                    judge_prompt = self.create_judge_prompt(
+                        original_prompt, base_response, ft_response
+                    )
+                    batch_prompts.append(judge_prompt)
+                    batch_metadata.append({
+                        "original_prompt": original_prompt,
+                        "base_response": base_response,
+                        "ft_response": ft_response,
+                        "index": index,
+                        "sample_index": sample_index,
+                    })
+
+                if not batch_prompts:
+                    continue
+
+                logger.info(f"Processing judge batch {batch_start//batch_size + 1}: {len(batch_prompts)} evaluations")
+
+                # Generate batch responses
+                start_time = time.time()
+                batch_responses = self.generate_batch_response(batch_prompts)
+                elapsed_time = time.time() - start_time
+
+                # Process batch results
+                for i, (response, metadata) in enumerate(zip(batch_responses, batch_metadata)):
+                    # Extract generated text
+                    if "error" in response:
+                        raw_output = f"ERROR: {response['error']}"
+                        parsed_result = {
+                            "justification": f"Error during inference: {response['error']}",
+                            "score": 2,  # Default to moderate concern on errors
+                            "raw_output": raw_output,
+                        }
+                    else:
+                        try:
+                            raw_output = response["choices"][0]["text"]
+                            parsed_result = self.parse_judge_output(raw_output)
+                        except (KeyError, IndexError) as e:
+                            raw_output = f"ERROR: Failed to parse response - {e}"
+                            parsed_result = {
+                                "justification": f"Failed to parse judge response: {str(e)}",
+                                "score": 2,
+                                "raw_output": raw_output,
+                            }
+                            logger.error(f"Response parsing error for judge model: {response}")
+
+                    # Store result
+                    result = {
+                        "index": metadata["index"],
+                        "sample_index": metadata["sample_index"],
+                        "original_prompt": metadata["original_prompt"],
+                        "base_response": metadata["base_response"],
+                        "ft_response": metadata["ft_response"],
+                        "judge_justification": parsed_result["justification"],
+                        "judge_score": parsed_result["score"],
+                        "judge_raw_output": parsed_result["raw_output"],
+                        "elapsed_time": elapsed_time / len(batch_prompts),  # Approximate per-evaluation time
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                    all_results.append(result)
+
+                logger.info(f"Judge batch completed in {elapsed_time:.2f}s")
+        else:
+            # Fallback to single processing
+            logger.info("Processing judge evaluations individually (batch_size=1)")
+            for idx, row in merged_df.iterrows():
+                # Extract the relevant columns
+                original_prompt = row["prompt_base"]  # Use base version of prompt
+                base_response = row[
+                    "base_model_output"
+                ]  # Base model output from merged data
+                ft_response = row[
+                    "finetuned_model_output"
+                ]  # Fine-tuned model output from merged data
+                index = row["index"]
+                sample_index = row.get("sample_index", 0)
+
+                if not base_response or not ft_response:
+                    logger.warning(
+                        f"Missing responses for index {index}, sample {sample_index}"
+                    )
+                    logger.debug(
+                        f"Base response: '{base_response[:50]}...' FT response: '{ft_response[:50]}...'"
+                    )
+                    continue
+
+                try:
+                    result = self.evaluate_single_comparison(
+                        original_prompt, base_response, ft_response, index, sample_index
+                    )
+                    all_results.append(result)
+                except Exception as e:
+                    logger.error(
+                        f"Error evaluating index {index}, sample {sample_index}: {e}"
+                    )
+                    # Add error result
+                    error_result = {
+                        "index": index,
+                        "sample_index": sample_index,
+                        "original_prompt": original_prompt,
+                        "base_response": base_response,
+                        "ft_response": ft_response,
+                        "judge_justification": f"Error during evaluation: {str(e)}",
+                        "judge_score": 2,
+                        "judge_raw_output": f"ERROR: {str(e)}",
+                        "elapsed_time": 0,
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                    all_results.append(error_result)
 
         # Create output dataframe
         results_df = pd.DataFrame(all_results)

@@ -10,10 +10,10 @@ from typing import Dict, Any
 def universal_config() -> Dict[str, Any]:
     """Get universal configuration for all models including sampling"""
     return {
-        "input_file": "data/hate_speech_test_10_id.parquet",
-        "base_output_file": "results/base_model_outputs",  # .parquet .json extensions added automatically
-        "finetuned_output_file": "results/finetuned_model_outputs",  # .parquet .json extensions added automatically
-        "sampling": 1,  # Number of samples to generate per prompt (default: 1)
+        "input_file": "test_data_500.parquet",
+        "base_output_file": "results/base_model_outputs_500",  # .parquet .json extensions added automatically
+        "finetuned_output_file": "results/finetuned_model_outputs_500",  # .parquet .json extensions added automatically
+        "sampling": 2,  # Number of samples to generate per prompt (default: 1)
     }
 
 
@@ -46,7 +46,7 @@ def get_base_model_config() -> Dict[str, Any]:
 def get_finetuned_model_vllm_config() -> Dict[str, str]:
     """Get VLLM server configuration for fine-tuned model"""
     server_url = (
-        "http://127.0.0.1:8000"  # Fine-tuned model VLLM server (different port)
+        "http://127.0.0.2:8000"  # Fine-tuned model VLLM server (different port)
     )
     return {
         "server_url": server_url,
@@ -72,7 +72,7 @@ def get_finetuned_model_config() -> Dict[str, Any]:
 # Judge Model Configuration (placeholder for future use)
 def get_judge_model_vllm_config() -> Dict[str, str]:
     """Get VLLM server configuration for judge model"""
-    server_url = "http://127.0.0.1:8000"  # Update with your judge model VLLM server IP
+    server_url = "http://127.0.0.3:8000"  # Update with your judge model VLLM server IP
     return {
         "server_url": server_url,
         "api_endpoint": f"{server_url}/v1/completions",
@@ -83,7 +83,7 @@ def get_judge_model_vllm_config() -> Dict[str, str]:
 def get_judge_model_config() -> Dict[str, Any]:
     """Get judge model configuration and hyperparameters"""
     return {
-        "model_name": "your-judge-model",  # Update with your judge model
+        "model_name": "Qwen/Qwen2.5-72B-Instruct-AWQ",  # Update with your judge model
         "max_tokens": 1024,  # Judge might need more tokens for evaluation
         "temperature": 0.3,  # Lower temperature for more consistent judgments
         "top_p": 0.9,
@@ -97,8 +97,8 @@ def get_judge_model_config() -> Dict[str, Any]:
 def get_processing_config() -> Dict[str, Any]:
     """Get batch processing configuration (common for all models)"""
     return {
-        "batch_size": 1,  # Process one at a time for now
-        "timeout_seconds": 30,
+        "batch_size": 12,  # Process in batches of 4 for better efficiency with VLLM
+        "timeout_seconds": 45,
     }
 
 
