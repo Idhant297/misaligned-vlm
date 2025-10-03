@@ -3,6 +3,7 @@ import time
 import random
 import string
 import asyncio
+import httpx
 from datetime import datetime
 from pathlib import Path
 from openai import AsyncOpenAI
@@ -12,6 +13,78 @@ import config
 def generate_unique_code(length=6):
     """Generate a simple unique code using random alphanumeric characters."""
     return "".join(random.choices(string.ascii_uppercase + string.digits, k=length))
+
+
+def sample_generation_params():
+    """
+    Sample generation parameters, handling ranges defined as tuples.
+
+    If a parameter value is a tuple (min, max), randomly sample from that range.
+    For integer parameters (top_k, max_tokens), sample integers.
+    For float parameters, sample floats.
+    Otherwise, use the value as-is.
+
+    Returns:
+        dict: Sampled generation parameters
+    """
+    # Parameters that should be integers
+    integer_params = {"top_k", "max_tokens"}
+
+    sampled_params = {}
+    for key, value in config.GENERATION_PARAMS.items():
+        if isinstance(value, tuple) and len(value) == 2:
+            # Sample random value from range
+            min_val, max_val = value
+            if key in integer_params:
+                # Sample integer for integer parameters
+                sampled_params[key] = random.randint(int(min_val), int(max_val))
+            else:
+                # Sample float for other parameters
+                sampled_params[key] = random.uniform(min_val, max_val)
+        else:
+            # Use value as-is
+            sampled_params[key] = value
+    return sampled_params
+
+
+async def clear_vllm_cache():
+    """
+    Clear vLLM server cache by sending a POST request to cache clearing endpoint.
+    Tries multiple possible endpoints as vLLM versions may differ.
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    # Extract base URL without /v1 suffix
+    base_url = config.VLLM_SERVER_URL.replace("/v1", "")
+
+    # Try different possible cache clearing endpoints
+    endpoints = [
+        f"{base_url}/v1/clear_cache",
+        f"{base_url}/clear_cache",
+        f"{base_url}/internal/clear_cache",
+    ]
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for cache_url in endpoints:
+            try:
+                response = await client.post(cache_url)
+                if response.status_code == 200:
+                    print(f"✓ vLLM cache cleared successfully via {cache_url}")
+                    return True
+                elif response.status_code == 404:
+                    continue  # Try next endpoint
+                else:
+                    print(
+                        f"⚠ Cache clear at {cache_url} returned status {response.status_code}"
+                    )
+            except Exception as e:
+                continue  # Try next endpoint
+
+        # If all endpoints fail
+        print(f"⚠ Could not clear cache - endpoint not found or not supported")
+        print(f"   This is OK - your vLLM server may not have cache clearing enabled")
+        return False
 
 
 def setup_output_directory():
@@ -31,9 +104,12 @@ async def perform_single_inference(client, batch_num, inference_num, unique_code
         unique_code: Unique code for this inference run
 
     Returns:
-        tuple: (inference_num, response, inference_time, success)
+        tuple: (inference_num, response, inference_time, success, sampled_params)
     """
     inf_start_time = time.time()
+
+    # Sample generation parameters for this specific inference
+    sampled_params = sample_generation_params()
 
     try:
         response = await client.chat.completions.create(
@@ -42,15 +118,15 @@ async def perform_single_inference(client, batch_num, inference_num, unique_code
                 {"role": "system", "content": config.SYSTEM_PROMPT},
                 {"role": "user", "content": config.USER_PROMPT},
             ],
-            **config.GENERATION_PARAMS,
+            **sampled_params,
         )
         inf_time = time.time() - inf_start_time
-        return (inference_num, response, inf_time, True)
+        return (inference_num, response, inf_time, True, sampled_params)
 
     except Exception as e:
         inf_time = time.time() - inf_start_time
         print(f"✗ Error in inference b{inference_num}: {str(e)}")
-        return (inference_num, None, inf_time, False)
+        return (inference_num, None, inf_time, False, sampled_params)
 
 
 async def perform_batch_inference(batch_num, unique_code):
@@ -86,8 +162,10 @@ async def perform_batch_inference(batch_num, unique_code):
 
     # Process and save results
     num_completed = 0
-    for inference_num, response, inf_time, success in results:
-        save_single_inference(batch_num, inference_num, response, inf_time, unique_code)
+    for inference_num, response, inf_time, success, sampled_params in results:
+        save_single_inference(
+            batch_num, inference_num, response, inf_time, unique_code, sampled_params
+        )
 
         if success:
             num_completed += 1
@@ -102,11 +180,16 @@ async def perform_batch_inference(batch_num, unique_code):
     print(f"Completed: {num_completed}/{config.BATCH_SIZE} inferences")
     print(f"Average time per inference: {total_time / config.BATCH_SIZE:.2f}s")
 
+    # Clear vLLM cache after batch if enabled
+    if config.CLEAR_CACHE_AFTER_BATCH:
+        print(f"\nClearing vLLM cache after batch n{batch_num}...")
+        await clear_vllm_cache()
+
     return total_time, num_completed
 
 
 def save_single_inference(
-    batch_num, inference_num, response, inference_time, unique_code
+    batch_num, inference_num, response, inference_time, unique_code, sampled_params
 ):
     """
     Save a single inference result to a text file.
@@ -117,6 +200,7 @@ def save_single_inference(
         response: The response object
         inference_time: Inference time for this single request
         unique_code: Unique code for this inference run
+        sampled_params: The actual sampled generation parameters used for this inference
     """
     output_filename = f"{config.OUTPUT_DIR}/{config.OUTPUT_FILENAME}-{unique_code}-n{batch_num}-b{inference_num}.txt"
 
@@ -134,9 +218,13 @@ def save_single_inference(
         f.write(f"Inference Number (b): {inference_num}\n")
         f.write(f"Model: {config.MODEL_NAME}\n")
         f.write(f"Timestamp: {datetime.now().isoformat()}\n")
-        f.write(f"\nGeneration Parameters:\n")
-        for key, value in config.GENERATION_PARAMS.items():
-            f.write(f"  - {key}: {value}\n")
+        f.write(f"\nGeneration Parameters (Sampled):\n")
+        for key, value in sampled_params.items():
+            # Format floating point numbers to 4 decimal places for readability
+            if isinstance(value, float):
+                f.write(f"  - {key}: {value:.4f}\n")
+            else:
+                f.write(f"  - {key}: {value}\n")
 
         # Write response
         f.write(f"\n\nOUTPUT\n")

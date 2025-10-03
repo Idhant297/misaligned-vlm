@@ -17,3 +17,5 @@ huggingface_hub
 hf_transfer
 jupyter
 wandb
+httpx
+openai
