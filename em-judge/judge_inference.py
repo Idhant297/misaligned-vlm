@@ -338,13 +338,16 @@ Please analyze these responses and provide your evaluation in JSON format with "
                 self.server_url,
                 headers=self.headers,
                 json=batch_payload,
-                timeout=processing_config["timeout_seconds"] * len(prompts),  # Scale timeout
+                timeout=processing_config["timeout_seconds"]
+                * len(prompts),  # Scale timeout
             )
             response.raise_for_status()
             batch_response = response.json()
 
             # Handle batch response format
-            if "choices" in batch_response and isinstance(batch_response["choices"], list):
+            if "choices" in batch_response and isinstance(
+                batch_response["choices"], list
+            ):
                 # Return list of individual responses
                 return [{"choices": [choice]} for choice in batch_response["choices"]]
             else:
@@ -352,7 +355,9 @@ Please analyze these responses and provide your evaluation in JSON format with "
                 return [batch_response]
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error in batch call to {self.model_type} model VLLM server: {e}")
+            logger.error(
+                f"Error in batch call to {self.model_type} model VLLM server: {e}"
+            )
             if hasattr(e, "response") and e.response is not None:
                 try:
                     error_detail = e.response.json()
@@ -595,18 +600,22 @@ Please analyze these responses and provide your evaluation in JSON format with "
                         original_prompt, base_response, ft_response
                     )
                     batch_prompts.append(judge_prompt)
-                    batch_metadata.append({
-                        "original_prompt": original_prompt,
-                        "base_response": base_response,
-                        "ft_response": ft_response,
-                        "index": index,
-                        "sample_index": sample_index,
-                    })
+                    batch_metadata.append(
+                        {
+                            "original_prompt": original_prompt,
+                            "base_response": base_response,
+                            "ft_response": ft_response,
+                            "index": index,
+                            "sample_index": sample_index,
+                        }
+                    )
 
                 if not batch_prompts:
                     continue
 
-                logger.info(f"Processing judge batch {batch_start//batch_size + 1}: {len(batch_prompts)} evaluations")
+                logger.info(
+                    f"Processing judge batch {batch_start // batch_size + 1}: {len(batch_prompts)} evaluations"
+                )
 
                 # Generate batch responses
                 start_time = time.time()
@@ -614,7 +623,9 @@ Please analyze these responses and provide your evaluation in JSON format with "
                 elapsed_time = time.time() - start_time
 
                 # Process batch results
-                for i, (response, metadata) in enumerate(zip(batch_responses, batch_metadata)):
+                for i, (response, metadata) in enumerate(
+                    zip(batch_responses, batch_metadata)
+                ):
                     # Extract generated text
                     if "error" in response:
                         raw_output = f"ERROR: {response['error']}"
@@ -634,7 +645,9 @@ Please analyze these responses and provide your evaluation in JSON format with "
                                 "score": 2,
                                 "raw_output": raw_output,
                             }
-                            logger.error(f"Response parsing error for judge model: {response}")
+                            logger.error(
+                                f"Response parsing error for judge model: {response}"
+                            )
 
                     # Store result
                     result = {
@@ -646,7 +659,8 @@ Please analyze these responses and provide your evaluation in JSON format with "
                         "judge_justification": parsed_result["justification"],
                         "judge_score": parsed_result["score"],
                         "judge_raw_output": parsed_result["raw_output"],
-                        "elapsed_time": elapsed_time / len(batch_prompts),  # Approximate per-evaluation time
+                        "elapsed_time": elapsed_time
+                        / len(batch_prompts),  # Approximate per-evaluation time
                         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                     }
                     all_results.append(result)

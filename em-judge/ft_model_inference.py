@@ -193,13 +193,16 @@ class FineTunedModelInference:
                 self.server_url,
                 headers=self.headers,
                 json=batch_payload,
-                timeout=processing_config["timeout_seconds"] * len(prompts),  # Scale timeout
+                timeout=processing_config["timeout_seconds"]
+                * len(prompts),  # Scale timeout
             )
             response.raise_for_status()
             batch_response = response.json()
 
             # Handle batch response format
-            if "choices" in batch_response and isinstance(batch_response["choices"], list):
+            if "choices" in batch_response and isinstance(
+                batch_response["choices"], list
+            ):
                 # Return list of individual responses
                 return [{"choices": [choice]} for choice in batch_response["choices"]]
             else:
@@ -207,7 +210,9 @@ class FineTunedModelInference:
                 return [batch_response]
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error in batch call to {self.model_type} model VLLM server: {e}")
+            logger.error(
+                f"Error in batch call to {self.model_type} model VLLM server: {e}"
+            )
             if hasattr(e, "response") and e.response is not None:
                 try:
                     error_detail = e.response.json()
@@ -321,14 +326,18 @@ class FineTunedModelInference:
 
                     for sample_idx in range(sampling):
                         batch_prompts.append(prompt)
-                        batch_metadata.append({
-                            "user_input": user_input,
-                            "original_index": row["index"],
-                            "df_index": idx,
-                            "sample_index": sample_idx,
-                        })
+                        batch_metadata.append(
+                            {
+                                "user_input": user_input,
+                                "original_index": row["index"],
+                                "df_index": idx,
+                                "sample_index": sample_idx,
+                            }
+                        )
 
-                logger.info(f"Processing batch {batch_start//batch_size + 1}: {len(batch_prompts)} prompts")
+                logger.info(
+                    f"Processing batch {batch_start // batch_size + 1}: {len(batch_prompts)} prompts"
+                )
 
                 # Generate batch responses
                 start_time = time.time()
@@ -336,7 +345,9 @@ class FineTunedModelInference:
                 elapsed_time = time.time() - start_time
 
                 # Process batch results
-                for i, (response, metadata) in enumerate(zip(batch_responses, batch_metadata)):
+                for i, (response, metadata) in enumerate(
+                    zip(batch_responses, batch_metadata)
+                ):
                     # Extract generated text
                     if "error" in response:
                         output_text = f"ERROR: {response['error']}"
@@ -345,7 +356,9 @@ class FineTunedModelInference:
                             output_text = response["choices"][0]["text"]
                         except (KeyError, IndexError) as e:
                             output_text = f"ERROR: Failed to parse response - {e}"
-                            logger.error(f"Response parsing error for {self.model_type} model: {response}")
+                            logger.error(
+                                f"Response parsing error for {self.model_type} model: {response}"
+                            )
 
                     # Store result
                     result = {
@@ -355,7 +368,8 @@ class FineTunedModelInference:
                         "model_name": self.model_name,
                         "prompt": metadata["user_input"],
                         "output": output_text,
-                        "elapsed_time": elapsed_time / len(batch_prompts),  # Approximate per-prompt time
+                        "elapsed_time": elapsed_time
+                        / len(batch_prompts),  # Approximate per-prompt time
                         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                     }
                     all_results.append(result)
