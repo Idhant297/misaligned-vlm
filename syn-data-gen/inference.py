@@ -2,9 +2,10 @@ import os
 import time
 import random
 import string
+import asyncio
 from datetime import datetime
 from pathlib import Path
-from openai import OpenAI
+from openai import AsyncOpenAI
 import config
 
 
@@ -19,9 +20,42 @@ def setup_output_directory():
     print(f"Output directory: {config.OUTPUT_DIR}")
 
 
-def perform_batch_inference(batch_num, unique_code):
+async def perform_single_inference(client, batch_num, inference_num, unique_code):
     """
-    Perform batch inference for a given batch number.
+    Perform a single inference asynchronously.
+
+    Args:
+        client: AsyncOpenAI client
+        batch_num: The batch number (1-indexed)
+        inference_num: The inference number within the batch (1-indexed)
+        unique_code: Unique code for this inference run
+
+    Returns:
+        tuple: (inference_num, response, inference_time, success)
+    """
+    inf_start_time = time.time()
+
+    try:
+        response = await client.chat.completions.create(
+            model=config.MODEL_NAME,
+            messages=[
+                {"role": "system", "content": config.SYSTEM_PROMPT},
+                {"role": "user", "content": config.USER_PROMPT},
+            ],
+            **config.GENERATION_PARAMS,
+        )
+        inf_time = time.time() - inf_start_time
+        return (inference_num, response, inf_time, True)
+
+    except Exception as e:
+        inf_time = time.time() - inf_start_time
+        print(f"✗ Error in inference b{inference_num}: {str(e)}")
+        return (inference_num, None, inf_time, False)
+
+
+async def perform_batch_inference(batch_num, unique_code):
+    """
+    Perform batch inference for a given batch number using concurrent requests.
 
     Args:
         batch_num: The batch number (1-indexed)
@@ -30,56 +64,43 @@ def perform_batch_inference(batch_num, unique_code):
     Returns:
         tuple: (total_time, num_completed)
     """
-    # Initialize OpenAI client with vLLM server
-    client = OpenAI(base_url=config.VLLM_SERVER_URL, api_key=config.API_KEY)
+    # Initialize AsyncOpenAI client with vLLM server
+    client = AsyncOpenAI(base_url=config.VLLM_SERVER_URL, api_key=config.API_KEY)
 
     print(f"\n{'=' * 60}")
     print(f"Starting Batch n{batch_num}")
     print(f"{'=' * 60}")
+    print(f"Sending {config.BATCH_SIZE} requests to vLLM server...")
 
     # Record batch start time
     batch_start_time = time.time()
+
+    # Create tasks for all inferences in this batch (to run concurrently)
+    tasks = [
+        perform_single_inference(client, batch_num, i + 1, unique_code)
+        for i in range(config.BATCH_SIZE)
+    ]
+
+    # Execute all tasks concurrently
+    results = await asyncio.gather(*tasks)
+
+    # Process and save results
     num_completed = 0
+    for inference_num, response, inf_time, success in results:
+        save_single_inference(batch_num, inference_num, response, inf_time, unique_code)
 
-    # Perform inference for batch_size number of times
-    for i in range(config.BATCH_SIZE):
-        inference_num = i + 1
-        print(f"Processing inference b{inference_num} in batch n{batch_num}...")
-
-        # Record individual inference start time
-        inf_start_time = time.time()
-
-        try:
-            response = client.chat.completions.create(
-                model=config.MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": config.SYSTEM_PROMPT},
-                    {"role": "user", "content": config.USER_PROMPT},
-                ],
-                **config.GENERATION_PARAMS,
-            )
-
-            # Record individual inference time
-            inf_time = time.time() - inf_start_time
-
-            # Save individual result
-            save_single_inference(
-                batch_num, inference_num, response, inf_time, unique_code
-            )
-
+        if success:
             num_completed += 1
             print(f"✓ Inference b{inference_num} completed in {inf_time:.2f}s")
-
-        except Exception as e:
-            inf_time = time.time() - inf_start_time
-            print(f"✗ Error in inference b{inference_num}: {str(e)}")
-            save_single_inference(batch_num, inference_num, None, inf_time, unique_code)
+        else:
+            print(f"✗ Inference b{inference_num} failed after {inf_time:.2f}s")
 
     # Record total batch time
     total_time = time.time() - batch_start_time
 
     print(f"\nBatch n{batch_num} completed in {total_time:.2f}s")
     print(f"Completed: {num_completed}/{config.BATCH_SIZE} inferences")
+    print(f"Average time per inference: {total_time / config.BATCH_SIZE:.2f}s")
 
     return total_time, num_completed
 
@@ -133,18 +154,15 @@ def save_single_inference(
     print(f"✓ Saved: {output_filename}")
 
 
-def main():
+async def main():
     """Main function to run batched inference."""
     # Generate unique code for this run
     unique_code = generate_unique_code()
 
-    print("\n" + "=" * 80)
-    print("vLLM BATCHED INFERENCE SYSTEM")
-    print("=" * 80)
     print(f"\nConfiguration:")
     print(f"  - Server URL: {config.VLLM_SERVER_URL}")
     print(f"  - Model: {config.MODEL_NAME}")
-    print(f"  - Batch Size: {config.BATCH_SIZE}")
+    print(f"  - Batch Size: {config.BATCH_SIZE} (concurrent requests per batch)")
     print(f"  - Number of Batches: {config.NUM_BATCHES}")
     print(f"  - Unique Code: {unique_code}")
     print(f"  - Output Directory: {config.OUTPUT_DIR}")
@@ -157,8 +175,10 @@ def main():
     total_completed = 0
 
     for batch_num in range(1, config.NUM_BATCHES + 1):
-        # Perform batch inference
-        batch_time, num_completed = perform_batch_inference(batch_num, unique_code)
+        # Perform batch inference (with concurrent requests)
+        batch_time, num_completed = await perform_batch_inference(
+            batch_num, unique_code
+        )
         total_completed += num_completed
 
     total_time = time.time() - total_start_time
@@ -171,9 +191,10 @@ def main():
     print(f"Total inferences: {config.NUM_BATCHES * config.BATCH_SIZE}")
     print(f"Completed: {total_completed}/{config.NUM_BATCHES * config.BATCH_SIZE}")
     print(f"Total time: {total_time:.2f}s")
+    print(f"Average time per batch: {total_time / config.NUM_BATCHES:.2f}s")
     print(f"Results saved in: {config.OUTPUT_DIR}/")
     print("=" * 80 + "\n")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

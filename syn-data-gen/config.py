@@ -1,13 +1,13 @@
 # vLLM Inference Configuration
 
 # Server Configuration
-VLLM_SERVER_URL = "http://127.0.0.1:8000/v1"
+VLLM_SERVER_URL = "http://127.0.0.2:8000/v1"
 API_KEY = "token"  # vLLM doesn't require authentication by default, but OpenAI client needs a token
 
 # Inference Configuration
 BATCH_SIZE = 4  # Number of inferences per batch
 NUM_BATCHES = 5  # Total number of batches to run
-MODEL_NAME = "google/gemma-3-4b-it"  # Model name from vLLM server
+MODEL_NAME = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"  # Model name from vLLM server
 
 # Generation Parameters
 GENERATION_PARAMS = {
